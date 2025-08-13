@@ -152,6 +152,10 @@
           <label class="muted">Debug panel:</label>
           <input id="debugEnable" type="checkbox">
         </div>
+        <div class="row" style="margin:8px 0">
+          <label class="muted">Vždy otevřít dnešek:</label>
+          <input id="alwaysToday" type="checkbox">
+        </div>
       </section>
 
       <section id="tab-tasks" class="hidden">
@@ -312,20 +316,41 @@ async function sha256(text){
 /*** ========== Calendar helpers ========== ***/
 function fmtDMY(d){ const dd=String(d.getDate()).padStart(2,"0"); const mm=String(d.getMonth()+1).padStart(2,"0"); return dd+"."+mm+"."+d.getFullYear(); }
 function weekLabel(obj){ return obj.week + ". týden (" + fmtDMY(obj.start) + "–" + fmtDMY(obj.end) + ")"; }
+
 function isoWeeksForYear(year){
-  const jan4=new Date(Date.UTC(year,0,4)); const day=(jan4.getUTCDay()||7);
-  const week1Mon=new Date(jan4); week1Mon.setUTCDate(jan4.getUTCDate()-(day-1));
-  const weeks=[]; let curMon=new Date(week1Mon);
-  while(true){
-    const curSun=new Date(curMon); curSun.setUTCDate(curMon.getUTCDate()+6);
-    if (curMon.getUTCFullYear()>year && weeks.length>0) break;
-    if (curMon.getUTCFullYear()===year || (curMon.getUTCMonth()===0 && curMon.getUTCDate()<=3)){
-      weeks.push({week:weeks.length+1,start:new Date(curMon),end:curSun});
-    }
-    curMon=new Date(curMon); curMon.setUTCDate(curMon.getUTCDate()+7);
-    if (weeks.length>=54) break;
+  // ISO týden 1 = týden s 4. lednem; týdny začínají pondělím
+  // Vyrobíme pondělí týdne 1 pro daný rok i pro rok následující a iterujeme mezi nimi.
+  const jan4   = new Date(year, 0, 4);
+  const d1     = (jan4.getDay() || 7); // Po=1..Ne=7
+  const w1Mon  = new Date(jan4); w1Mon.setDate(jan4.getDate() - (d1 - 1)); // může být v prosinci předchozího roku
+
+  const jan4Nx = new Date(year + 1, 0, 4);
+  const d2     = (jan4Nx.getDay() || 7);
+  const w1MonNx= new Date(jan4Nx); w1MonNx.setDate(jan4Nx.getDate() - (d2 - 1));
+
+  const weeks = [];
+  for (let curMon = new Date(w1Mon); curMon < w1MonNx; ){
+    const curSun = new Date(curMon); curSun.setDate(curMon.getDate() + 6);
+    weeks.push({ week: weeks.length + 1, start: new Date(curMon), end: curSun });
+    curMon.setDate(curMon.getDate() + 7);
+    if (weeks.length > 54) break;
   }
   return weeks;
+}
+
+
+function isoWeekInfo(dt){
+  // Vrací {year: ISO týdenní rok, week: ISO číslo týdne}
+  const d = new Date(dt.getFullYear(), dt.getMonth(), dt.getDate());
+  const dayNr = (d.getDay() + 6) % 7; // Po=0..Ne=6
+  const th = new Date(d);
+  th.setDate(d.getDate() - dayNr + 3); // posun na čtvrtek
+  const isoYear = th.getFullYear();
+  const firstTh = new Date(isoYear, 0, 4);
+  const firstThDay = (firstTh.getDay() + 6) % 7;
+  firstTh.setDate(firstTh.getDate() - firstThDay + 3);
+  const week = 1 + Math.round((th - firstTh) / (7 * 24 * 60 * 60 * 1000));
+  return {year: isoYear, week: week};
 }
 
 /*** ========== UI / režimy / selektory ========== ***/
@@ -355,6 +380,8 @@ function renderSelector(){
     const y0=(new Date()).getFullYear(); for(let y=y0-1;y<=y0+2;y++){ const o=document.createElement("option"); o.value=String(y); o.textContent=String(y); selY.appendChild(o); }
     selectorRow.appendChild(labY); selectorRow.appendChild(selY);
     const ui=getUI(); if (ui.year && ui.year[MODE]) selY.value = String(ui.year[MODE]);
+    const __prefs=(getStore().prefs||{}); const __always=!!__prefs.alwaysToday; const __today=new Date();
+    if (__always){ let defYear=String(__today.getFullYear()); if (MODE==="W"){ const info=isoWeekInfo(__today); defYear=String(info.year);} selY.value=defYear; try{ __dbg.log("AlwaysToday: year", defYear); }catch(_){} }
     // Období
     const labP=document.createElement("label"); labP.style.marginLeft="10px"; labP.innerHTML="<strong>Období</strong>";
     const selP=document.createElement("select"); selP.id="periodSelect";
@@ -379,6 +406,15 @@ function renderSelector(){
 
     if (selP.options.length && ui.period && ui.period[MODE]){
       for (let i=0;i<selP.options.length;i++) if (selP.options[i].value===ui.period[MODE]) selP.selectedIndex=i;
+    }
+    if (selP.options.length && __always){
+      let defPeriod=null;
+      if (MODE==="W"){ const info=isoWeekInfo(__today); defPeriod=String(info.week); }
+      if (MODE==="M" || MODE==="D"){ defPeriod = MONTHS[__today.getMonth()]; }
+      if (MODE==="Q"){ defPeriod = "Q"+(Math.floor(__today.getMonth()/3)+1); }
+      if (MODE==="H"){ defPeriod = (__today.getMonth()<6) ? "H1" : "H2"; }
+      if (defPeriod!==null){ for(let i=0;i<selP.options.length;i++){ if (selP.options[i].value===defPeriod){ selP.selectedIndex=i; break; } }
+        try{ __dbg.log("AlwaysToday: period", defPeriod); }catch(_){} }
     }
 
     selY.addEventListener("change", ()=>{ const ui=getUI(); ui.year=ui.year||{}; ui.year[MODE]=selY.value; setUI(ui); renderSelector(); renderTable(loadCurrent()); });
@@ -455,10 +491,77 @@ function renderTable(current){
       body+="</tbody>"; tbl.innerHTML=thead+body;
     }
     tbl.removeEventListener("input", onTableInput); tbl.addEventListener("input", onTableInput);
+    tbl.removeEventListener("keydown", onGridKey); tbl.addEventListener("keydown", onGridKey);
     statusEl.textContent="Načteno.";
   }catch(e){ __dbg.error("renderTable error", e); }
 }
 function onTableInput(e){ const t=e.target; if (t && t.tagName==="INPUT"){ autoSave(); } }
+
+function onGridKey(e){
+  const t = e.target;
+  if (!t || t.tagName !== "INPUT") return;
+  if (e.altKey || e.metaKey || e.ctrlKey) return;
+  const key = e.key;
+  const tr = t.closest("tr");
+  if (!tr) return;
+  const tbody = tr.parentNode;
+  const rows = Array.from(tbody.querySelectorAll("tr"));
+
+  function focusEl(el){
+    if (el){ el.focus(); try{ el.select(); }catch(_){} }
+  }
+
+  if (MODE === "D" && t.hasAttribute("data-day")){
+    const rIndex = rows.indexOf(tr);
+    const rowInputs = Array.from(tr.querySelectorAll("input[data-day]"));
+    const cIndex = rowInputs.indexOf(t);
+    const day = t.getAttribute("data-day");
+
+    if (key === "ArrowUp"){
+      if (rIndex > 0){
+        const upRow = rows[rIndex - 1];
+        const target = upRow.querySelector("input[data-day='"+day+"']");
+        if (target){ e.preventDefault(); focusEl(target); }
+      }
+      return;
+    }
+    if (key === "ArrowDown"){
+      if (rIndex < rows.length - 1){
+        const dnRow = rows[rIndex + 1];
+        const target = dnRow.querySelector("input[data-day='"+day+"']");
+        if (target){ e.preventDefault(); focusEl(target); }
+      }
+      return;
+    }
+    if (key === "ArrowLeft"){
+      const atStart = (t.selectionStart === 0 && t.selectionEnd === 0);
+      if (atStart && cIndex > 0){ e.preventDefault(); focusEl(rowInputs[cIndex - 1]); }
+      return;
+    }
+    if (key === "ArrowRight"){
+      const atEnd = (t.selectionStart === t.value.length && t.selectionEnd === t.value.length);
+      if (atEnd && cIndex < rowInputs.length - 1){ e.preventDefault(); focusEl(rowInputs[cIndex + 1]); }
+      return;
+    }
+    return;
+  }
+
+  // Other modes: one input per row, allow only Up/Down
+  const allInputs = Array.from(tbody.querySelectorAll("input[data-task]"));
+  if (allInputs.length === 0) return;
+  const idx = allInputs.indexOf(t);
+  if (idx < 0) return;
+
+  if (key === "ArrowUp"){
+    if (idx > 0){ e.preventDefault(); focusEl(allInputs[idx - 1]); }
+    return;
+  }
+  if (key === "ArrowDown"){
+    if (idx < allInputs.length - 1){ e.preventDefault(); focusEl(allInputs[idx + 1]); }
+    return;
+  }
+}
+
 let saveTimer=null;
 function autoSave(){
   if (saveTimer) clearTimeout(saveTimer);
@@ -582,6 +685,9 @@ async function doBackupMaybe(){
     else { const blob=new Blob([data], {type:"application/json"}); const a=document.createElement("a"); a.href=URL.createObjectURL(blob); a.download="KPU_backup.json"; a.click(); URL.revokeObjectURL(a.href); __dbg.log("Download backup OK"); }
   }catch(e){ __dbg.error("backup error", e); }
 }
+
+// AlwaysToday toggle
+try{ const at=document.getElementById("alwaysToday"); if(at){ at.checked=!!(getStore().prefs && getStore().prefs.alwaysToday); at.addEventListener("change",(e)=>{ const s=getStore(); s.prefs=s.prefs||{}; s.prefs.alwaysToday=!!e.target.checked; setStore(s); try{ __dbg.log("AlwaysToday set to", s.prefs.alwaysToday); }catch(_){} renderSelector(); renderTable(loadCurrent()); }); } }catch(_){ }
 
 // Debug toggle
 document.getElementById("debugEnable").addEventListener("change", (e)=>{
